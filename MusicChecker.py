@@ -4,7 +4,6 @@ import mimetypes
 from MusicFile import MusicFile as mf
 import mutagen
 import copy
-import time
 import json
 import Cache
 import argparse
