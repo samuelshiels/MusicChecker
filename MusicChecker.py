@@ -1,81 +1,163 @@
 import LinuxHelper as lh
 import os
-import sys
 import mimetypes
-from File import File as F
 from MusicFile import MusicFile as mf
 import mutagen
-from mutagen.mp3 import MP3
-from mutagen.id3 import ID3
-import MusicBrainzAPI
 import copy
+import time
+import json
+import Cache
+import argparse
 
-#001 Build File List
-def buildList(rootPath):
-    returnArray = []
-    i = 0
-    for root, dirs, filenames in os.walk(rootPath):
-        for f in filenames:
-            i = i + 1
-            if i > 15000:
-                return returnArray
-            fullpath = os.path.join(root, f)
-            mt = mimetypes.guess_type(fullpath, True)
-            #print(fullpath,mt)
-            compatibleTypes = ['audio/mpeg','audio/x-flac']
-            if mt[0] in compatibleTypes:
-                fileObj = mf(path=root, fileName=f, fileType=mt[0])
-                returnArray.append(fileObj)
-    return returnArray
+appName = 'MusicChecker'
+useHome = True
+fileAge = 5
+cacheDirectory = lh.getCacheDirectory() + appName
+
+
+def __init_argparse() -> argparse.ArgumentParser:
+
+	parser = argparse.ArgumentParser(
+		usage="%(prog)s [OPTION] [FILE]...",
+		description="<program_description"
+	)
+
+	parser.add_argument(
+		"-v", "--version", action="version",
+		version=f"{parser.prog} version 0.01"
+	)
+	###
+	# Add Custom arguments here with add_argument
+	###
+	parser.add_argument('-d', '--directory', nargs=1, default='',
+				help='Directory to search')
+	parser.add_argument('-t', '--tags', nargs=1, default='',
+				help='Tags to validate')
+
+	args = parser.parse_args()
+	return parser
+
+
+# 001 Build File List
+def buildList(rootPath, compatibleTypes=['audio/mpeg','audio/x-flac']):
+	'''
+	Takes a string representing a path and returns a list of MusicFiles
+	'''
+	returnArray = []
+	i = 0
+	for root, dirs, filenames in os.walk(rootPath):
+		for f in filenames:
+			i = i + 1
+			#if i > 15000:
+				#return returnArray
+			fullpath = os.path.join(root, f)
+			mt = mimetypes.guess_type(fullpath, True)
+			#print(fullpath,mt)
+			if mt[0] in compatibleTypes:
+				fileObj = mf(path=root, fileName=f, fileType=mt[0])
+				returnArray.append(fileObj)
+	return returnArray
+
+def _readCache(file, tagList):
+	global useHome, cacheDirectory, fileAge
+	fileName = lh.encodeMD5(file.fileName)
+	config = {
+		'home': useHome,
+		'cache': os.path.join(cacheDirectory,lh.encodeMD5(','.join(tagList))),
+		'file': fileName,
+		'time': fileAge,
+		'dump': True
+	}
+	output = Cache.readCache(config)
+	#print(output)
+	if output['valid']:
+		return output['content'][0]
+	return False
+
+def _writeCache(file, tagList):
+	global useHome, cacheDirectory, fileAge
+	fileName = lh.encodeMD5(file.fileName)
+	config = {
+		'home': useHome,
+		'cache': os.path.join(cacheDirectory,lh.encodeMD5(','.join(tagList))),
+		'file': fileName,
+		'time': fileAge,
+		'dump': False,
+		'write': json.dumps(file.tags)
+	}
+	Cache.writeCache(config)
+	return
+
 #002 Extract Tags
 
 def extractTags(fileList, tagList):
-    returnList = fileList
-    i = 0
-    for file in returnList:
-        i = i + 1
-        #print(file.tags)
-        #print(file.fileName)
-        if i > 15000:
-            continue
-        if file.fileType != 'audio/mpeg':
-            continue
-        try:
-            pathToSong = os.path.join(file.path,file.fileName)
-            #print(pathToSong)
-            m = mutagen.File(pathToSong)
-            tags = m.tags
-            #print(tags)
-            if tags == None:
-                pass
-            else:
-                for v in tagList:
-                    #print(v)
-                    if v in tags:
-                        #print('found')
-                        #print({v[0]:str(v[1])})
-                        tagsObj = {tags[0]:str(tags[1])}
-                        print(tagsObj)
-                        file.tags = copy.deepcopy(tagsObj)
-                        #print(file.tags)
+	returnList = fileList
+	#print(tagList)
+	for file in returnList:
+		check = _readCache(file, tagList)
+		if check is False:
+			if file.fileType == 'audio/mpeg':
+				getMP3Tags(file, tagList, True)
+			if file.fileType != 'audio/mpeg':
+				continue
+		else:
+			file.tags = json.loads(check)
+	return returnList
 
-        except Exception as err:
-            print(f"Unexpected {err=}, {type(err)=}")
-            pass
-        
-    return returnList
+
+
 #003 MP3
+def getMP3Tags(file, tagList, cache=False):
+	'''
+	Using a MusicFile object and list of tag keys returns the MusicFile with the tags found
+	'''
+	try:
+		pathToSong = os.path.join(file.path,file.fileName)
+		m = mutagen.File(pathToSong)
+		tags = m.tags
+		if tags == None:
+			pass
+		else:
+			tagsObj = {}
+			for v in tagList:
+				if v in tags:
+					#print(tags[v])
+					tagsObj[v] = str(tags[v])
+					#print(tagsObj)
+			file.tags = copy.deepcopy(tagsObj)
+			if cache:
+				_writeCache(file, tagList)
+			return file
+	except Exception as err:
+		file.error = f"Unexpected {err=}, {type(err)=}"
+		pass
 
 #004 FLAC
 
 #005 Return
-fileList = buildList('/media/library/Music/')
 
-fileList = extractTags(fileList, ['MUSICBRAINZ_ARTISTID'])
-#print(fileList[0].tags)
-print('finished')
-for file in fileList:
-    #print(MusicBrainzAPI.getReleasesByArtist(fileList[0].tags[0]['MUSICBRAINZ_ARTISTID']))
-    print(fileList[0].tags)
-    pass
-#print(fileList[0].path,fileList[0].fileName,fileList[0].fileType, fileList[0].tags)
+def __validateConfig(config):
+	config['tags'] = config['tags'].split(',')
+	return config
+
+def execute(config):
+	config = __validateConfig(config)
+	if not config:
+		return False
+	returnJSON = False
+	fileList = buildList(config['directory'])
+	tags = extractTags(fileList, config['tags'])
+	returnJSON = tags
+	return returnJSON
+
+def main():
+	args = __init_argparse()
+	config = {
+		'directory': args.directory,
+		'tags':args.taglist
+	}
+	returnJSON = execute(config)
+	print(returnJSON)
+
+if __name__ == '__main__':
+	main()
